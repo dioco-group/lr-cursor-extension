@@ -1,0 +1,67 @@
+{
+  "name": "lr-course-editor",
+  "displayName": "Language Reactor Course Editor",
+  "description": "Edit, preview, and manage Language Reactor courses",
+  "version": "0.0.1",
+  "publisher": "language-reactor",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:json"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "lr-course-manager",
+          "title": "LR Courses",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "lr-course-manager": [
+        {
+          "type": "webview",
+          "id": "lr-course-manager.sidebar",
+          "name": "Course Manager"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "lr-course-editor.previewModule",
+        "title": "LR: Preview Course Module",
+        "icon": "$(open-preview)"
+      },
+      {
+        "command": "lr-course-editor.openSidebar",
+        "title": "LR: Open Course Manager"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "when": "resourceExtname == .json",
+          "command": "lr-course-editor.previewModule",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0"
+  }
+}
