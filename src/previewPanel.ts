@@ -1,584 +1,431 @@
-import * as vscode from 'vscode';
-import { Module, DialogueActivity, GrammarActivity, ExerciseActivity, ChatActivity, Activity } from './types';
+import * as vscode from "vscode";
+import { parseModuleFile } from "./parser/moduleParser";
+import { lintModuleText } from "./parser/diagnostics";
+import {
+  Module,
+  ModuleVoiceConfig,
+  Activity,
+  DialogueActivity,
+  ExerciseActivity,
+  GrammarActivity,
+  ChatActivity,
+  DialogueLine,
+  ExerciseItem,
+  VoiceSpec,
+} from "./parser/types";
+import { Diagnostic } from "./parser/diagnostics";
 
-export class PreviewPanel {
-    public static readonly viewType = 'lr-course-editor.preview';
-    private static _panels: Map<string, PreviewPanel> = new Map();
+export class ModulePreviewPanel {
+  static currentPanel: ModulePreviewPanel | undefined;
+  private panel: vscode.WebviewPanel;
+  private extensionUri: vscode.Uri;
+  private disposables: vscode.Disposable[] = [];
 
-    private readonly _panel: vscode.WebviewPanel;
-    private readonly _document: vscode.TextDocument;
-    private _disposables: vscode.Disposable[] = [];
+  private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
+    this.panel = panel;
+    this.extensionUri = extensionUri;
+    this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
+  }
 
-    public static createOrShow(document: vscode.TextDocument, extensionUri: vscode.Uri) {
-        const key = document.uri.toString();
-        const existing = PreviewPanel._panels.get(key);
-        if (existing) {
-            existing._panel.reveal(vscode.ViewColumn.Beside);
-            return;
-        }
-
-        const panel = vscode.window.createWebviewPanel(
-            PreviewPanel.viewType,
-            `Preview: ${getFileName(document.uri)}`,
-            { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
-            { enableScripts: true, localResourceRoots: [extensionUri] }
-        );
-
-        const preview = new PreviewPanel(panel, document, extensionUri);
-        PreviewPanel._panels.set(key, preview);
+  static createOrShow(extensionUri: vscode.Uri): ModulePreviewPanel {
+    const column = vscode.ViewColumn.Beside;
+    if (ModulePreviewPanel.currentPanel) {
+      ModulePreviewPanel.currentPanel.panel.reveal(column);
+      return ModulePreviewPanel.currentPanel;
     }
+    const panel = vscode.window.createWebviewPanel(
+      "lr.modulePreview",
+      "Module Preview",
+      column,
+      {
+        enableScripts: false,
+        localResourceRoots: [vscode.Uri.joinPath(extensionUri, "media")],
+      },
+    );
+    ModulePreviewPanel.currentPanel = new ModulePreviewPanel(
+      panel,
+      extensionUri,
+    );
+    return ModulePreviewPanel.currentPanel;
+  }
 
-    private constructor(
-        panel: vscode.WebviewPanel,
-        document: vscode.TextDocument,
-        private readonly _extensionUri: vscode.Uri
-    ) {
-        this._panel = panel;
-        this._document = document;
-
-        this._update();
-
-        this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
-
-        // Re-render on document change
-        const changeDisposable = vscode.workspace.onDidChangeTextDocument((e) => {
-            if (e.document.uri.toString() === this._document.uri.toString()) {
-                this._update();
-            }
-        });
-        this._disposables.push(changeDisposable);
+  update(document: vscode.TextDocument): void {
+    const text = document.getText();
+    let html: string;
+    try {
+      const mod = parseModuleFile(text);
+      html = this.renderModule(mod);
+    } catch (e: any) {
+      const diagnostics = lintModuleText(text);
+      html = this.renderError(e.message || String(e), diagnostics);
     }
+    this.panel.title = `Preview: ${document.fileName.split("/").pop()}`;
+    this.panel.webview.html = html;
+  }
 
-    public dispose() {
-        const key = this._document.uri.toString();
-        PreviewPanel._panels.delete(key);
-        this._panel.dispose();
-        while (this._disposables.length) {
-            const d = this._disposables.pop();
-            if (d) { d.dispose(); }
-        }
+  private renderModule(mod: Module): string {
+    const toc = this.renderTOC(mod);
+    const content = this.renderContent(mod);
+    return this.wrapHtml(`
+      <div class="layout">
+        <nav class="toc">${toc}</nav>
+        <main class="content">${content}</main>
+      </div>
+    `);
+  }
+
+  private renderTOC(mod: Module): string {
+    let html = `<div class="toc-title">${esc(mod.title)}</div>`;
+    html += `<div class="toc-meta">${esc(mod.targetLang_G)} → ${esc(mod.homeLang_G)}</div>`;
+    for (const lesson of mod.lessons) {
+      html += `<div class="toc-lesson"><a href="#${esc(lesson.id)}">${esc(lesson.title)}</a></div>`;
+      for (const act of lesson.activities) {
+        html += `<div class="toc-activity"><a href="#${esc(act.id)}">${activityIcon(act.type)} ${esc(act.title)}</a></div>`;
+      }
     }
+    return html;
+  }
 
-    private _update() {
-        const text = this._document.getText();
-        let module: Module | null = null;
-        let error: string | null = null;
-
-        try {
-            const parsed = JSON.parse(text);
-            if (parsed.diocoDocId && parsed.lessons) {
-                module = parsed as Module;
-            } else {
-                error = 'This JSON file does not appear to be a course module (missing diocoDocId or lessons).';
-            }
-        } catch (e: unknown) {
-            const msg = e instanceof Error ? e.message : String(e);
-            error = `JSON parse error: ${msg}`;
-        }
-
-        this._panel.webview.html = this._getHtml(module, error);
+  private renderContent(mod: Module): string {
+    let html = "";
+    html += `<header class="module-header">`;
+    html += `<h1>${esc(mod.title)}</h1>`;
+    if (mod.description)
+      html += `<p class="description">${esc(mod.description)}</p>`;
+    html += `<div class="meta"><span class="badge target">${esc(mod.targetLang_G)}</span> <span class="badge home">${esc(mod.homeLang_G)}</span>`;
+    html += ` <span class="doc-id">${esc(mod.diocoDocId)}</span></div>`;
+    html += this.renderVoiceConfig(mod);
+    html += `</header>`;
+    for (const lesson of mod.lessons) {
+      html += `<section class="lesson" id="${esc(lesson.id)}">`;
+      html += `<h2 class="lesson-title">${esc(lesson.title)}</h2>`;
+      for (const act of lesson.activities) {
+        html += this.renderActivity(act);
+      }
+      html += `</section>`;
     }
+    return html;
+  }
 
-    private _getHtml(module: Module | null, error: string | null): string {
-        const body = error
-            ? `<div class="error">${escapeHtml(error)}</div>`
-            : module
-                ? renderModule(module)
-                : '<div class="error">No content</div>';
+  private renderVoiceConfig(mod: Module): string {
+    const vc = mod.voiceConfig;
+    const entries: string[] = [];
+    if (vc.default)
+      entries.push(
+        `<span class="voice-label">Default:</span> ${voiceSpecStr(vc.default)}`,
+      );
+    if (vc.introVoice)
+      entries.push(
+        `<span class="voice-label">Intro:</span> ${voiceSpecStr(vc.introVoice)}`,
+      );
+    if (vc.prompt)
+      entries.push(
+        `<span class="voice-label">Prompt:</span> ${voiceSpecStr(vc.prompt)}`,
+      );
+    if (vc.response)
+      entries.push(
+        `<span class="voice-label">Response:</span> ${voiceSpecStr(vc.response)}`,
+      );
+    for (const [name, spec] of Object.entries(vc.speakers)) {
+      entries.push(
+        `<span class="voice-label">${esc(name)}:</span> ${voiceSpecStr(spec)}`,
+      );
+    }
+    if (entries.length === 0) return "";
+    return `<div class="voice-config"><div class="voice-config-title">Voice Configuration</div>${entries.map((e) => `<div class="voice-entry">${e}</div>`).join("")}</div>`;
+  }
 
-        return /* html */ `<!DOCTYPE html>
+  private renderActivity(act: Activity): string {
+    let html = `<div class="activity activity-${act.type.toLowerCase()}" id="${esc(act.id)}">`;
+    html += `<h3>${activityIcon(act.type)} ${esc(act.title)}</h3>`;
+    if (act.intro)
+      html += `<div class="intro"><span class="field-label">INTRO</span> ${esc(act.intro)}</div>`;
+    switch (act.type) {
+      case "DIALOGUE":
+        html += this.renderDialogue(act);
+        break;
+      case "EXERCISE":
+        html += this.renderExercise(act);
+        break;
+      case "GRAMMAR":
+        html += this.renderGrammar(act);
+        break;
+      case "CHAT":
+        html += this.renderChat(act);
+        break;
+    }
+    html += `</div>`;
+    return html;
+  }
+
+  private renderDialogue(act: DialogueActivity): string {
+    let html = "";
+    if (act.instruction)
+      html += `<div class="instruction"><span class="field-label">INSTRUCTION</span> ${esc(act.instruction)}</div>`;
+    html += `<div class="dialogue-lines">`;
+    for (const line of act.lines) {
+      html += this.renderDialogueLine(line);
+    }
+    html += `</div>`;
+    return html;
+  }
+
+  private renderDialogueLine(line: DialogueLine): string {
+    let html = `<div class="dialogue-line">`;
+    if (line.speaker) html += `<div class="speaker">${esc(line.speaker)}</div>`;
+    if (line.vocab && line.vocab.length > 0) {
+      html += `<div class="vocab-list">`;
+      for (const v of line.vocab) {
+        html += `<span class="vocab-item"><span class="vocab-word">${esc(v.word)}</span>`;
+        if (v.definition)
+          html += ` <span class="vocab-def">${esc(v.definition)}</span>`;
+        html += `</span>`;
+      }
+      html += `</div>`;
+    }
+    html += `<div class="line-text">${esc(line.text)}</div>`;
+    if (line.translation)
+      html += `<div class="line-translation">${esc(line.translation)}</div>`;
+    if (line.notes) html += `<div class="line-notes">${esc(line.notes)}</div>`;
+    html += `</div>`;
+    return html;
+  }
+
+  private renderExercise(act: ExerciseActivity): string {
+    let html = "";
+    if (act.instruction)
+      html += `<div class="instruction"><span class="field-label">INSTRUCTION</span> ${esc(act.instruction)}</div>`;
+    html += `<div class="exercise-items">`;
+    for (let i = 0; i < act.items.length; i++) {
+      html += this.renderExerciseItem(act.items[i], i + 1);
+    }
+    html += `</div>`;
+    return html;
+  }
+
+  private renderExerciseItem(item: ExerciseItem, num: number): string {
+    const cls = item.isExample ? "exercise-item example" : "exercise-item";
+    let html = `<div class="${cls}">`;
+    if (item.isExample) html += `<div class="example-badge">Example</div>`;
+    html += `<div class="exercise-num">${num}</div>`;
+    html += `<div class="exercise-body">`;
+    html += `<div class="prompt"><span class="field-label">P</span> ${esc(item.prompt)}</div>`;
+    if (item.promptTranslation)
+      html += `<div class="prompt-t">${esc(item.promptTranslation)}</div>`;
+    html += `<div class="response"><span class="field-label">R</span> ${esc(item.response)}</div>`;
+    if (item.responseTranslation)
+      html += `<div class="response-t">${esc(item.responseTranslation)}</div>`;
+    html += `</div></div>`;
+    return html;
+  }
+
+  private renderGrammar(act: GrammarActivity): string {
+    return `<div class="grammar-content">${renderMarkdown(act.content)}</div>`;
+  }
+
+  private renderChat(act: ChatActivity): string {
+    let html = "";
+    html += `<div class="chat-field"><span class="field-label">SCENARIO</span><div class="chat-text">${esc(act.scenario)}</div></div>`;
+    html += `<div class="chat-field"><span class="field-label">INITIAL_PROMPT</span><div class="chat-text">${esc(act.initialPrompt)}</div></div>`;
+    return html;
+  }
+
+  private renderError(message: string, diagnostics: Diagnostic[]): string {
+    let html = `<div class="error"><h2>Parse Error</h2><pre>${esc(message)}</pre>`;
+    if (diagnostics && diagnostics.length > 0) {
+      html += `<h3>Issues Found</h3><ul class="diagnostics">`;
+      for (const d of diagnostics) {
+        const cls = d.severity === "error" ? "diag-error" : "diag-warning";
+        html += `<li class="${cls}"><span class="diag-line">Line ${d.line}</span> ${esc(d.message)}`;
+        if (d.code) html += ` <span class="diag-code">${esc(d.code)}</span>`;
+        html += `</li>`;
+      }
+      html += `</ul>`;
+    }
+    html += `</div>`;
+    return this.wrapHtml(html);
+  }
+
+  private wrapHtml(body: string): string {
+    return `<!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: var(--vscode-font-family);
-            font-size: 13px;
-            color: var(--vscode-foreground);
-            background: var(--vscode-editor-background);
-            padding: 16px 20px;
-            line-height: 1.5;
-        }
-
-        .error {
-            color: var(--vscode-errorForeground);
-            background: var(--vscode-inputValidation-errorBackground);
-            border: 1px solid var(--vscode-inputValidation-errorBorder);
-            padding: 12px;
-            border-radius: 4px;
-            margin: 12px 0;
-        }
-
-        /* Module header */
-        .module-header {
-            margin-bottom: 20px;
-            padding-bottom: 12px;
-            border-bottom: 2px solid var(--vscode-panel-border);
-        }
-        .module-title {
-            font-size: 18px;
-            font-weight: 600;
-            margin-bottom: 4px;
-        }
-        .module-meta {
-            font-size: 11px;
-            opacity: 0.7;
-            display: flex;
-            gap: 12px;
-        }
-        .module-desc {
-            margin-top: 6px;
-            font-size: 12px;
-            opacity: 0.8;
-        }
-        .module-id {
-            font-family: var(--vscode-editor-font-family);
-            font-size: 11px;
-            opacity: 0.5;
-        }
-
-        /* Lesson */
-        .lesson {
-            margin-bottom: 24px;
-        }
-        .lesson-header {
-            font-size: 15px;
-            font-weight: 600;
-            margin-bottom: 12px;
-            padding: 6px 0;
-            border-bottom: 1px solid var(--vscode-panel-border);
-            display: flex;
-            align-items: baseline;
-            gap: 8px;
-        }
-        .lesson-id {
-            font-family: var(--vscode-editor-font-family);
-            font-size: 10px;
-            opacity: 0.4;
-            font-weight: 400;
-        }
-
-        /* Activity shared */
-        .activity {
-            margin-bottom: 16px;
-            border: 1px solid var(--vscode-panel-border);
-            border-radius: 4px;
-            overflow: hidden;
-        }
-        .activity-header {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 6px 10px;
-            font-size: 12px;
-            font-weight: 600;
-            background: var(--vscode-sideBarSectionHeader-background);
-        }
-        .activity-type {
-            font-size: 10px;
-            font-weight: 600;
-            padding: 1px 5px;
-            border-radius: 3px;
-            text-transform: uppercase;
-            letter-spacing: 0.3px;
-        }
-        .type-dialogue { background: #2563eb22; color: #60a5fa; border: 1px solid #2563eb44; }
-        .type-grammar { background: #7c3aed22; color: #a78bfa; border: 1px solid #7c3aed44; }
-        .type-exercise { background: #05966922; color: #34d399; border: 1px solid #05966944; }
-        .type-chat { background: #d9770622; color: #fbbf24; border: 1px solid #d9770644; }
-        .activity-title {
-            flex: 1;
-        }
-        .activity-id {
-            font-family: var(--vscode-editor-font-family);
-            font-size: 10px;
-            opacity: 0.4;
-            font-weight: 400;
-        }
-        .activity-body {
-            padding: 10px;
-        }
-        .activity-instruction {
-            font-size: 12px;
-            opacity: 0.7;
-            font-style: italic;
-            margin-bottom: 8px;
-        }
-
-        /* Dialogue */
-        .dialogue-line {
-            display: grid;
-            grid-template-columns: 90px 1fr 1fr;
-            gap: 8px;
-            padding: 5px 0;
-            border-bottom: 1px solid var(--vscode-panel-border);
-            font-size: 12px;
-            align-items: start;
-        }
-        .dialogue-line:last-child { border-bottom: none; }
-        .dl-speaker {
-            font-weight: 600;
-            font-size: 11px;
-            color: #60a5fa;
-            padding-top: 1px;
-        }
-        .dl-text {
-            font-weight: 500;
-        }
-        .dl-translation {
-            opacity: 0.65;
-            font-style: italic;
-        }
-        .dl-notes {
-            grid-column: 2 / 4;
-            font-size: 11px;
-            opacity: 0.55;
-            padding: 2px 0 0 0;
-        }
-        .dl-vocab {
-            grid-column: 2 / 4;
-            display: flex;
-            flex-wrap: wrap;
-            gap: 4px;
-            padding: 2px 0;
-        }
-        .vocab-tag {
-            font-size: 10px;
-            padding: 1px 6px;
-            background: var(--vscode-badge-background);
-            color: var(--vscode-badge-foreground);
-            border-radius: 3px;
-        }
-
-        /* Grammar */
-        .grammar-content {
-            font-size: 12px;
-            line-height: 1.6;
-        }
-        .grammar-content h2 { font-size: 14px; margin: 12px 0 6px; }
-        .grammar-content h3 { font-size: 13px; margin: 10px 0 4px; }
-        .grammar-content p { margin: 4px 0; }
-        .grammar-content ul, .grammar-content ol { padding-left: 20px; margin: 4px 0; }
-        .grammar-content table {
-            border-collapse: collapse;
-            margin: 6px 0;
-            font-size: 12px;
-        }
-        .grammar-content th, .grammar-content td {
-            padding: 3px 10px;
-            border: 1px solid var(--vscode-panel-border);
-            text-align: left;
-        }
-        .grammar-content th {
-            background: var(--vscode-sideBarSectionHeader-background);
-            font-weight: 600;
-        }
-        .grammar-content code {
-            font-family: var(--vscode-editor-font-family);
-            background: var(--vscode-textCodeBlock-background);
-            padding: 1px 4px;
-            border-radius: 2px;
-        }
-        .grammar-content strong { color: #60a5fa; }
-        .grammar-content em { opacity: 0.8; }
-
-        /* Exercise */
-        .exercise-table {
-            width: 100%;
-            font-size: 12px;
-        }
-        .exercise-row {
-            display: grid;
-            grid-template-columns: 20px 1fr 1fr;
-            gap: 8px;
-            padding: 5px 0;
-            border-bottom: 1px solid var(--vscode-panel-border);
-            align-items: start;
-        }
-        .exercise-row:last-child { border-bottom: none; }
-        .ex-num {
-            font-size: 11px;
-            opacity: 0.5;
-            text-align: right;
-        }
-        .ex-prompt { }
-        .ex-response { font-weight: 500; }
-        .ex-translation {
-            font-size: 11px;
-            opacity: 0.55;
-            font-style: italic;
-        }
-        .ex-example {
-            opacity: 0.7;
-        }
-        .ex-example-badge {
-            font-size: 9px;
-            padding: 0px 4px;
-            background: #059669;
-            color: #fff;
-            border-radius: 2px;
-            margin-left: 4px;
-        }
-
-        /* Chat */
-        .chat-scenario {
-            font-size: 12px;
-            padding: 8px;
-            background: var(--vscode-textBlockQuote-background);
-            border-left: 3px solid #fbbf24;
-            border-radius: 2px;
-            margin-bottom: 8px;
-        }
-        .chat-prompt-label {
-            font-size: 11px;
-            font-weight: 600;
-            opacity: 0.7;
-            margin-bottom: 2px;
-        }
-        .chat-prompt {
-            font-size: 12px;
-            font-style: italic;
-        }
-
-        /* Voice config */
-        .voice-config {
-            margin-bottom: 16px;
-            padding: 8px 10px;
-            background: var(--vscode-textBlockQuote-background);
-            border-radius: 4px;
-            font-size: 11px;
-        }
-        .voice-config-title {
-            font-weight: 600;
-            font-size: 11px;
-            margin-bottom: 4px;
-            opacity: 0.7;
-        }
-        .voice-entry {
-            display: flex;
-            gap: 8px;
-        }
-        .voice-label {
-            min-width: 70px;
-            opacity: 0.6;
-        }
-        .voice-value {
-            font-family: var(--vscode-editor-font-family);
-            font-size: 11px;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>${CSS}</style>
 </head>
-<body>
-    ${body}
-    <script>
-        // Simple markdown-to-HTML for grammar content
-        document.querySelectorAll('.grammar-raw').forEach(el => {
-            let md = el.textContent || '';
-            // Headers
-            md = md.replace(/^### (.+)$/gm, '<h3>$1</h3>');
-            md = md.replace(/^## (.+)$/gm, '<h2>$1</h2>');
-            // Bold and italic
-            md = md.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
-            md = md.replace(/\\*(.+?)\\*/g, '<em>$1</em>');
-            // Tables
-            md = md.replace(/^\\|(.+)\\|$/gm, (match) => {
-                const cells = match.split('|').filter(c => c.trim()).map(c => c.trim());
-                return '<tr>' + cells.map(c => '<td>' + c + '</td>').join('') + '</tr>';
-            });
-            md = md.replace(/(<tr>.*<\\/tr>\\n?)+/g, (match) => {
-                const rows = match.trim().split('\\n').filter(r => !r.match(/^\\|[-|]+\\|$/));
-                if (rows.length === 0) return match;
-                let first = rows[0].replace(/<td>/g, '<th>').replace(/<\\/td>/g, '</th>');
-                return '<table>' + first + rows.slice(1).join('') + '</table>';
-            });
-            // Lists
-            md = md.replace(/^- (.+)$/gm, '<li>$1</li>');
-            md = md.replace(/(<li>.*<\\/li>\\n?)+/g, (match) => '<ul>' + match + '</ul>');
-            // Paragraphs (lines not already wrapped)
-            md = md.replace(/^(?!<[hultro])(.+)$/gm, '<p>$1</p>');
-            // Inline code
-            md = md.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
-            // Line breaks
-            md = md.replace(/\\n/g, '');
-
-            const wrapper = document.createElement('div');
-            wrapper.className = 'grammar-content';
-            wrapper.innerHTML = md;
-            el.replaceWith(wrapper);
-        });
-    </script>
-</body>
+<body>${body}</body>
 </html>`;
-    }
+  }
+
+  dispose(): void {
+    ModulePreviewPanel.currentPanel = undefined;
+    this.panel.dispose();
+    while (this.disposables.length) this.disposables.pop()!.dispose();
+  }
 }
 
-// -- Render functions --------------------------------------------------------
-
-function renderModule(m: Module): string {
-    const voiceHtml = renderVoiceConfig(m);
-    const lessonsHtml = m.lessons.map(l => renderLesson(l)).join('');
-
-    return /* html */ `
-    <div class="module-header">
-        <div class="module-title">${escapeHtml(m.title)}</div>
-        <div class="module-id">${escapeHtml(m.diocoDocId)}</div>
-        <div class="module-meta">
-            <span>Target: ${escapeHtml(m.targetLang_G)}</span>
-            <span>Home: ${escapeHtml(m.homeLang_G)}</span>
-            <span>${m.lessons.length} lessons</span>
-            <span>${m.lessons.reduce((n, l) => n + l.activities.length, 0)} activities</span>
-        </div>
-        ${m.description ? `<div class="module-desc">${escapeHtml(m.description)}</div>` : ''}
-    </div>
-    ${voiceHtml}
-    ${lessonsHtml}`;
+function esc(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
-function renderVoiceConfig(m: Module): string {
-    const vc = m.voiceConfig;
-    if (!vc) { return ''; }
-
-    const entries: string[] = [];
-    if (vc.default) { entries.push(renderVoiceEntry('Default', vc.default)); }
-    if (vc.prompt) { entries.push(renderVoiceEntry('Prompt', vc.prompt)); }
-    if (vc.response) { entries.push(renderVoiceEntry('Response', vc.response)); }
-    if (vc.introVoice) { entries.push(renderVoiceEntry('Intro', vc.introVoice)); }
-    for (const [name, spec] of Object.entries(vc.speakers)) {
-        entries.push(renderVoiceEntry(name, spec));
-    }
-
-    if (entries.length === 0) { return ''; }
-
-    return /* html */ `
-    <div class="voice-config">
-        <div class="voice-config-title">Voice Configuration</div>
-        ${entries.join('')}
-    </div>`;
+function activityIcon(type: string): string {
+  switch (type) {
+    case "DIALOGUE":
+      return "\u{1F4AC}";
+    case "EXERCISE":
+      return "\u{270F}\u{FE0F}";
+    case "GRAMMAR":
+      return "\u{1F4D6}";
+    case "CHAT":
+      return "\u{1F5E3}\u{FE0F}";
+    default:
+      return "\u{1F4C4}";
+  }
 }
 
-function renderVoiceEntry(label: string, spec: string | { voice: string; prompt: string | null } | null): string {
-    if (!spec) { return ''; }
-    const val = typeof spec === 'string' ? spec : spec.voice;
-    return `<div class="voice-entry"><span class="voice-label">${escapeHtml(label)}</span><span class="voice-value">${escapeHtml(val)}</span></div>`;
+function voiceSpecStr(spec: string | VoiceSpec): string {
+  if (typeof spec === "string") return esc(spec);
+  let s = `<span class="voice-name">${esc(spec.voice)}</span>`;
+  if (spec.prompt)
+    s += ` <span class="voice-prompt">${esc(spec.prompt)}</span>`;
+  return s;
 }
 
-function renderLesson(l: { id: string; title: string; activities: Activity[] }): string {
-    const activities = l.activities.map(a => renderActivity(a)).join('');
-    return /* html */ `
-    <div class="lesson">
-        <div class="lesson-header">
-            ${escapeHtml(l.title)}
-            <span class="lesson-id">${escapeHtml(l.id)}</span>
-        </div>
-        ${activities}
-    </div>`;
+function renderMarkdown(md: string): string {
+  let html = esc(md);
+  // {curly bracket} phrases -> highlighted audio buttons
+  html = html.replace(/\{([^}]+)\}/g, '<span class="audio-phrase">$1</span>');
+  html = html.replace(/^### (.+)$/gm, "<h5>$1</h5>");
+  html = html.replace(/^## (.+)$/gm, "<h4>$1</h4>");
+  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/\*(.+?)\*/g, "<em>$1</em>");
+  html = html.replace(/^- (.+)$/gm, "<li>$1</li>");
+  html = html.replace(/(<li>.*<\/li>\n?)+/g, "<ul>$&</ul>");
+  html = html.replace(/^\|(.+)\|$/gm, (match: string) => {
+    const cells = match
+      .split("|")
+      .filter((c: string) => c.trim())
+      .map((c: string) => c.trim());
+    if (cells.every((c: string) => /^[-:]+$/.test(c))) return "";
+    const tag = "td";
+    return (
+      "<tr>" +
+      cells.map((c: string) => `<${tag}>${c}</${tag}>`).join("") +
+      "</tr>"
+    );
+  });
+  html = html.replace(/(<tr>.*<\/tr>\n?)+/g, "<table>$&</table>");
+  html = html.replace(/\n\n+/g, "</p><p>");
+  html = "<p>" + html + "</p>";
+  html = html.replace(/<p>\s*<\/p>/g, "");
+  html = html.replace(/<p>\s*(<h[45]>)/g, "$1");
+  html = html.replace(/(<\/h[45]>)\s*<\/p>/g, "$1");
+  html = html.replace(/<p>\s*(<ul>)/g, "$1");
+  html = html.replace(/(<\/ul>)\s*<\/p>/g, "$1");
+  html = html.replace(/<p>\s*(<table>)/g, "$1");
+  html = html.replace(/(<\/table>)\s*<\/p>/g, "$1");
+  return html;
 }
 
-function renderActivity(a: Activity): string {
-    const typeClass = `type-${a.type.toLowerCase()}`;
-    let body = '';
-
-    switch (a.type) {
-        case 'DIALOGUE':
-            body = renderDialogue(a);
-            break;
-        case 'GRAMMAR':
-            body = renderGrammar(a);
-            break;
-        case 'EXERCISE':
-            body = renderExercise(a);
-            break;
-        case 'CHAT':
-            body = renderChat(a);
-            break;
-    }
-
-    return /* html */ `
-    <div class="activity">
-        <div class="activity-header">
-            <span class="activity-type ${typeClass}">${a.type}</span>
-            <span class="activity-title">${escapeHtml(a.title)}</span>
-            <span class="activity-id">${escapeHtml(a.id)}</span>
-        </div>
-        <div class="activity-body">
-            ${body}
-        </div>
-    </div>`;
+const CSS = `
+:root {
+  --bg: var(--vscode-editor-background);
+  --fg: var(--vscode-editor-foreground);
+  --border: var(--vscode-panel-border, #333);
+  --accent: var(--vscode-textLink-foreground, #4fc1ff);
+  --muted: var(--vscode-descriptionForeground, #888);
+  --badge-bg: var(--vscode-badge-background, #333);
+  --badge-fg: var(--vscode-badge-foreground, #fff);
+  --card-bg: var(--vscode-editorWidget-background, #1e1e1e);
+  --success: #4ec9b0;
+  --warning: #dcdcaa;
 }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: var(--vscode-font-family, system-ui); font-size: 13px; color: var(--fg); background: var(--bg); line-height: 1.5; }
 
-function renderDialogue(a: DialogueActivity): string {
-    const instruction = a.instruction
-        ? `<div class="activity-instruction">${escapeHtml(a.instruction)}</div>`
-        : '';
+.layout { display: flex; min-height: 100vh; }
+.toc { width: 220px; min-width: 220px; padding: 16px 12px; border-right: 1px solid var(--border); position: sticky; top: 0; height: 100vh; overflow-y: auto; }
+.toc-title { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+.toc-meta { color: var(--muted); font-size: 11px; margin-bottom: 12px; }
+.toc-lesson { margin-top: 8px; font-weight: 600; font-size: 12px; }
+.toc-activity { padding-left: 12px; font-size: 12px; }
+.toc a { color: var(--fg); text-decoration: none; }
+.toc a:hover { color: var(--accent); }
 
-    const lines = a.lines.map(line => {
-        const vocab = line.vocab && line.vocab.length > 0
-            ? `<div class="dl-vocab">${line.vocab.map(v => `<span class="vocab-tag">${escapeHtml(v.word)}: ${escapeHtml(v.definition)}</span>`).join('')}</div>`
-            : '';
-        const notes = line.notes
-            ? `<div class="dl-notes">${escapeHtml(line.notes)}</div>`
-            : '';
+.content { flex: 1; padding: 24px 32px; max-width: 800px; }
 
-        return /* html */ `
-        <div class="dialogue-line">
-            <div class="dl-speaker">${escapeHtml(line.speaker || '—')}</div>
-            <div class="dl-text">${escapeHtml(line.text)}</div>
-            <div class="dl-translation">${escapeHtml(line.translation)}</div>
-            ${notes}${vocab}
-        </div>`;
-    }).join('');
+.module-header { margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+.module-header h1 { font-size: 20px; margin-bottom: 6px; }
+.description { color: var(--muted); margin-bottom: 8px; }
+.meta { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.badge { padding: 2px 8px; border-radius: 3px; background: var(--badge-bg); color: var(--badge-fg); font-size: 11px; font-weight: 600; text-transform: uppercase; }
+.doc-id { color: var(--muted); font-family: monospace; font-size: 11px; }
 
-    return `${instruction}<div class="dialogue-lines">${lines}</div>`;
-}
+.voice-config { margin-top: 12px; padding: 8px 12px; background: var(--card-bg); border-radius: 4px; border: 1px solid var(--border); }
+.voice-config-title { font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
+.voice-entry { font-size: 12px; margin: 2px 0; }
+.voice-label { color: var(--muted); }
+.voice-name { color: var(--accent); font-family: monospace; }
+.voice-prompt { color: var(--muted); font-style: italic; }
 
-function renderGrammar(a: GrammarActivity): string {
-    return `<pre class="grammar-raw" style="display:none;white-space:pre-wrap;">${escapeHtml(a.content)}</pre>
-            <noscript><div class="grammar-content">${escapeHtml(a.content)}</div></noscript>`;
-}
+.lesson { margin-bottom: 32px; }
+.lesson-title { font-size: 16px; margin-bottom: 16px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
 
-function renderExercise(a: ExerciseActivity): string {
-    const instruction = a.instruction
-        ? `<div class="activity-instruction">${escapeHtml(a.instruction)}</div>`
-        : '';
+.activity { margin-bottom: 20px; padding: 12px 16px; background: var(--card-bg); border-radius: 6px; border: 1px solid var(--border); }
+.activity h3 { font-size: 14px; margin-bottom: 8px; }
 
-    const rows = a.items.map((item, i) => {
-        const exClass = item.isExample ? ' ex-example' : '';
-        const badge = item.isExample ? '<span class="ex-example-badge">example</span>' : '';
-        const promptT = item.promptTranslation ? `<div class="ex-translation">${escapeHtml(item.promptTranslation)}</div>` : '';
-        const responseT = item.responseTranslation ? `<div class="ex-translation">${escapeHtml(item.responseTranslation)}</div>` : '';
+.field-label { font-size: 10px; font-weight: 600; text-transform: uppercase; color: var(--muted); background: var(--badge-bg); padding: 1px 5px; border-radius: 2px; margin-right: 4px; }
 
-        return /* html */ `
-        <div class="exercise-row${exClass}">
-            <div class="ex-num">${i + 1}</div>
-            <div class="ex-prompt">${escapeHtml(item.prompt)}${badge}${promptT}</div>
-            <div class="ex-response">${escapeHtml(item.response)}${responseT}</div>
-        </div>`;
-    }).join('');
+.intro { color: var(--muted); font-style: italic; margin-bottom: 8px; padding: 6px 8px; border-left: 2px solid var(--accent); }
+.instruction { color: var(--muted); margin-bottom: 10px; font-size: 12px; }
 
-    return `${instruction}<div class="exercise-table">${rows}</div>`;
-}
+.dialogue-lines { display: flex; flex-direction: column; gap: 10px; }
+.dialogue-line { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.dialogue-line:last-child { border-bottom: none; }
+.speaker { font-weight: 600; color: var(--accent); font-size: 12px; margin-bottom: 2px; }
+.line-text { font-size: 15px; margin-bottom: 2px; }
+.line-translation { color: var(--muted); font-size: 13px; }
+.line-notes { color: var(--warning); font-size: 12px; margin-top: 4px; padding: 4px 8px; background: rgba(220, 220, 170, 0.08); border-radius: 3px; }
+.vocab-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
+.vocab-item { font-size: 11px; padding: 2px 6px; background: rgba(78, 201, 176, 0.1); border: 1px solid rgba(78, 201, 176, 0.2); border-radius: 3px; }
+.vocab-word { color: var(--success); font-weight: 600; }
+.vocab-def { color: var(--muted); }
 
-function renderChat(a: ChatActivity): string {
-    return /* html */ `
-    <div class="chat-scenario">${escapeHtml(a.scenario)}</div>
-    <div class="chat-prompt-label">Initial prompt:</div>
-    <div class="chat-prompt">${escapeHtml(a.initialPrompt)}</div>`;
-}
+.exercise-items { display: flex; flex-direction: column; gap: 6px; }
+.exercise-item { display: flex; gap: 8px; padding: 6px 8px; border-radius: 4px; }
+.exercise-item.example { background: rgba(78, 201, 176, 0.08); border: 1px dashed rgba(78, 201, 176, 0.3); }
+.example-badge { font-size: 10px; font-weight: 600; color: var(--success); text-transform: uppercase; }
+.exercise-num { color: var(--muted); font-size: 12px; min-width: 20px; padding-top: 2px; }
+.exercise-body { flex: 1; }
+.prompt { margin-bottom: 2px; }
+.prompt-t, .response-t { color: var(--muted); font-size: 12px; padding-left: 24px; }
+.response { color: var(--success); }
 
-// -- Helpers -----------------------------------------------------------------
+.grammar-content { line-height: 1.7; }
+.grammar-content h4, .grammar-content h5 { margin: 12px 0 6px; }
+.grammar-content ul { padding-left: 20px; margin: 6px 0; }
+.grammar-content li { margin: 3px 0; }
+.grammar-content table { border-collapse: collapse; margin: 8px 0; width: 100%; }
+.grammar-content td { padding: 4px 10px; border: 1px solid var(--border); }
+.grammar-content tr:first-child td { font-weight: 600; background: var(--badge-bg); }
+.audio-phrase { color: var(--accent); background: rgba(79, 193, 255, 0.08); padding: 1px 4px; border-radius: 3px; cursor: default; }
 
-function escapeHtml(s: string): string {
-    return s
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-}
+.chat-field { margin-bottom: 8px; }
+.chat-text { padding: 8px 12px; background: rgba(79, 193, 255, 0.05); border-radius: 4px; margin-top: 4px; }
 
-function getFileName(uri: vscode.Uri): string {
-    const parts = uri.path.split('/');
-    return parts[parts.length - 1];
-}
+.error { padding: 24px; }
+.error h2 { color: var(--vscode-errorForeground, #f44); margin-bottom: 12px; }
+.error h3 { margin-top: 16px; margin-bottom: 8px; font-size: 14px; }
+.error pre { white-space: pre-wrap; font-size: 13px; background: var(--card-bg); padding: 12px; border-radius: 4px; }
+.diagnostics { list-style: none; padding: 0; }
+.diagnostics li { padding: 4px 0; font-size: 13px; border-bottom: 1px solid var(--border); }
+.diag-error { color: var(--vscode-errorForeground, #f44); }
+.diag-warning { color: var(--warning); }
+.diag-line { font-weight: 600; margin-right: 8px; font-family: monospace; }
+.diag-code { color: var(--muted); font-size: 11px; font-family: monospace; }
+`;

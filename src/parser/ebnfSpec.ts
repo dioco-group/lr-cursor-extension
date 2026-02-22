@@ -1,0 +1,55 @@
+export type EbnfSpec = {
+  markers: string[];
+  headerFields: string[];
+  voiceFields: string[];
+  dialogueFields: string[];
+  exerciseFields: string[];
+  grammarFields: string[];
+  chatFields: string[];
+  exampleMarker: string | null;
+};
+
+export const ebnfSpec: EbnfSpec = {
+  markers: ["CHAT", "DIALOGUE", "EXERCISE", "GRAMMAR", "LESSON", "MODULE"],
+  headerFields: [
+    "DESCRIPTION",
+    "DIOCO_DOC_ID",
+    "HOME_LANG_G",
+    "IMAGE",
+    "TARGET_LANG_G",
+    "TITLE",
+    "TTS_PROMPT",
+    "USER_LANG_G",
+  ],
+  voiceFields: [
+    "VOICE",
+    "VOICE_DEFAULT",
+    "VOICE_INTRO",
+    "VOICE_PROMPT",
+    "VOICE_RESPONSE",
+    "VOICE_SPEAKER",
+  ],
+  dialogueFields: [
+    "INSTRUCTION",
+    "INTRO",
+    "LINE",
+    "LINE_T",
+    "NOTES",
+    "SPEAKER",
+    "TTS_PROMPT",
+    "VOCAB",
+    "VOCAB_T",
+  ],
+  exerciseFields: [
+    "INSTRUCTION",
+    "INTRO",
+    "PROMPT",
+    "PROMPT_T",
+    "RESPONSE",
+    "RESPONSE_T",
+    "TTS_PROMPT",
+  ],
+  grammarFields: ["INTRO"],
+  chatFields: ["INITIAL_PROMPT", "INTRO", "SCENARIO"],
+  exampleMarker: "EXAMPLE",
+};

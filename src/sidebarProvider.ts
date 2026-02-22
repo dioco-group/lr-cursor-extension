@@ -1,309 +1,278 @@
-import * as vscode from 'vscode';
-import { CourseListItem } from './types';
+import * as vscode from "vscode";
+import { GiteaCredentials, getGiteaCredentials } from "./config";
+import {
+  CourseRepo,
+  getMyRepos,
+  searchRepos,
+  getOrgRepos,
+} from "./giteaClient";
+import {
+  isClonedLocally,
+  getLocalStatus,
+  fetchRemote,
+  LocalRepoStatus,
+} from "./gitOps";
 
-const MOCK_COURSES: { official: CourseListItem[]; community: CourseListItem[]; user: CourseListItem[] } = {
-    official: [
-        { id: 'lc_fsi_french_basic', title: 'FSI French Basic Course', language: 'French', moduleCount: 24, source: 'official', description: 'Comprehensive introductory French course' },
-        { id: 'lc_fsi_spanish_basic', title: 'FSI Spanish Basic Course', language: 'Spanish', moduleCount: 20, source: 'official', description: 'Introductory Spanish from the FSI curriculum' },
-        { id: 'lc_alc_english_1', title: 'ALC English Beginner', language: 'English', moduleCount: 15, source: 'official', description: 'Beginner English for Arabic speakers' },
-    ],
-    community: [
-        { id: 'lc_comm_mandarin_travel', title: 'Mandarin for Travelers', language: 'Mandarin', moduleCount: 8, source: 'community', author: 'Chen Wei', description: 'Essential phrases for traveling in China' },
-        { id: 'lc_comm_portuguese_music', title: 'Portuguese Through Music', language: 'Portuguese', moduleCount: 6, source: 'community', author: 'Ana Silva', description: 'Learn Brazilian Portuguese through popular songs' },
-        { id: 'lc_comm_japanese_n5', title: 'JLPT N5 Prep', language: 'Japanese', moduleCount: 12, source: 'community', author: 'Tanaka Yuki', description: 'Preparation for JLPT N5 exam' },
-    ],
-    user: [
-        { id: 'lc_user_italian_cooking', title: 'Italian Cooking Vocabulary', language: 'Italian', moduleCount: 3, source: 'user', description: 'Kitchen and recipe terms in Italian' },
-    ],
-};
+const LR_ORG = "LanguageReactor";
 
-export class SidebarProvider implements vscode.WebviewViewProvider {
-    public static readonly viewType = 'lr-course-manager.sidebar';
+type CourseStatus = "remote" | "clean" | "dirty" | "behind" | "conflict";
 
-    constructor(private readonly _extensionUri: vscode.Uri) {}
+interface CourseState {
+  repo: CourseRepo;
+  local: LocalRepoStatus | null;
+  status: CourseStatus;
+}
 
-    public resolveWebviewView(
-        webviewView: vscode.WebviewView,
-        _context: vscode.WebviewViewResolveContext,
-        _token: vscode.CancellationToken
-    ) {
-        webviewView.webview.options = {
-            enableScripts: true,
-            localResourceRoots: [this._extensionUri],
-        };
+function computeStatus(
+  repo: CourseRepo,
+  local: LocalRepoStatus | null,
+): CourseStatus {
+  if (!local) return "remote";
+  if (local.hasChanges && local.behind > 0) return "conflict";
+  if (local.behind > 0) return "behind";
+  if (local.hasChanges || local.ahead > 0) return "dirty";
+  return "clean";
+}
 
-        webviewView.webview.html = this._getHtml(webviewView.webview);
+// ---------------------------------------------------------------------------
+// Tree items
+// ---------------------------------------------------------------------------
 
-        webviewView.webview.onDidReceiveMessage(async (message) => {
-            switch (message.command) {
-                case 'downloadAndEdit':
-                    vscode.window.showInformationMessage(`Download & Edit: ${message.courseId} (Gitea integration coming soon)`);
-                    break;
-                case 'suggestEdit':
-                    vscode.window.showInformationMessage(`Suggest Edit: ${message.courseId} (Gitea PR coming soon)`);
-                    break;
-                case 'openCourse':
-                    vscode.window.showInformationMessage(`Open: ${message.courseId}`);
-                    break;
-                case 'uploadChanges':
-                    vscode.window.showInformationMessage(`Upload Changes: ${message.courseId} (git push coming soon)`);
-                    break;
-                case 'createNew':
-                    vscode.window.showInformationMessage('Create New Course (Gitea template coming soon)');
-                    break;
-                case 'forkCourse':
-                    vscode.window.showInformationMessage(`Fork: ${message.courseId} (Gitea fork coming soon)`);
-                    break;
-                case 'previewCourse':
-                    vscode.window.showInformationMessage(`Preview: ${message.courseId}`);
-                    break;
+class SignInItem extends vscode.TreeItem {
+  constructor() {
+    super("Sign in to Language Reactor", vscode.TreeItemCollapsibleState.None);
+    this.command = { command: "lr.signIn", title: "Sign In" };
+    this.iconPath = new vscode.ThemeIcon("sign-in");
+  }
+}
+
+class SectionItem extends vscode.TreeItem {
+  section: "my" | "official" | "community";
+
+  constructor(
+    label: string,
+    section: "my" | "official" | "community",
+    count?: number,
+  ) {
+    super(label, vscode.TreeItemCollapsibleState.Expanded);
+    this.section = section;
+    this.contextValue = `section-${section}`;
+    const iconMap = {
+      my: "folder",
+      official: "organization",
+      community: "globe",
+    };
+    this.iconPath = new vscode.ThemeIcon(iconMap[section]);
+    if (count !== undefined) this.description = `${count}`;
+  }
+}
+
+export class CourseItem extends vscode.TreeItem {
+  repo: CourseRepo;
+  status: CourseStatus;
+
+  constructor(state: CourseState) {
+    super(state.repo.name, vscode.TreeItemCollapsibleState.None);
+    this.repo = state.repo;
+    this.status = state.status;
+
+    const canPush = state.repo.canPush;
+    const isFork = state.repo.isFork;
+
+    // Description and icon based on status
+    switch (state.status) {
+      case "remote":
+        this.description = "not downloaded";
+        this.iconPath = new vscode.ThemeIcon("cloud");
+        break;
+      case "clean":
+        this.description = "\u2713 up to date";
+        this.iconPath = new vscode.ThemeIcon("check");
+        break;
+      case "dirty": {
+        const parts: string[] = [];
+        if (state.local?.hasChanges) parts.push("modified");
+        if (state.local && state.local.ahead > 0)
+          parts.push(`${state.local.ahead} unpushed`);
+        this.description = `\u25CF ${parts.join(", ")}`;
+        this.iconPath = new vscode.ThemeIcon("diff-modified");
+        break;
+      }
+      case "behind":
+        this.description = "\u2193 update available";
+        this.iconPath = new vscode.ThemeIcon("cloud-download");
+        break;
+      case "conflict":
+        this.description = "\u2191\u2193 update first, then upload";
+        this.iconPath = new vscode.ThemeIcon("warning");
+        break;
+    }
+
+    // Tooltip
+    const lines = [state.repo.fullName];
+    if (state.repo.description) lines.push(state.repo.description);
+    if (isFork && state.repo.parentFullName)
+      lines.push(`Forked from ${state.repo.parentFullName}`);
+    if (canPush) lines.push("You have push access");
+    this.tooltip = lines.join("\n");
+
+    // Context value encodes status + permissions for menu when-clauses
+    // Pattern: course_{local|remote}_{status}_{push|readonly}[_fork]
+    const loc = state.status === "remote" ? "remote" : "local";
+    const perm = canPush ? "push" : "readonly";
+    const fork = isFork ? "_fork" : "";
+    this.contextValue = `course_${loc}_${state.status}_${perm}${fork}`;
+  }
+}
+
+class EmptyItem extends vscode.TreeItem {
+  constructor(label: string) {
+    super(label, vscode.TreeItemCollapsibleState.None);
+    this.iconPath = new vscode.ThemeIcon("info");
+  }
+}
+
+class ErrorItem extends vscode.TreeItem {
+  constructor(message: string) {
+    super(`Error: ${message}`, vscode.TreeItemCollapsibleState.None);
+    this.iconPath = new vscode.ThemeIcon("error");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Provider
+// ---------------------------------------------------------------------------
+
+export class CourseSidebarProvider implements vscode.TreeDataProvider<vscode.TreeItem> {
+  private _onDidChange = new vscode.EventEmitter<vscode.TreeItem | undefined>();
+  readonly onDidChangeTreeData = this._onDidChange.event;
+
+  private context: vscode.ExtensionContext;
+  private creds: GiteaCredentials | null = null;
+
+  private myStates: CourseState[] = [];
+  private officialStates: CourseState[] = [];
+  private communityStates: CourseState[] = [];
+
+  constructor(context: vscode.ExtensionContext) {
+    this.context = context;
+  }
+
+  async refresh(): Promise<void> {
+    this.creds = await getGiteaCredentials(this.context);
+    if (!this.creds) {
+      this.myStates = [];
+      this.officialStates = [];
+      this.communityStates = [];
+      this._onDidChange.fire(undefined);
+      return;
+    }
+
+    try {
+      const [myRepos, orgRepos, allRepos] = await Promise.all([
+        getMyRepos(this.creds),
+        getOrgRepos(this.creds, LR_ORG).catch(() => [] as CourseRepo[]),
+        searchRepos(this.creds),
+      ]);
+
+      const myNames = new Set(myRepos.map((r) => r.fullName));
+      const orgNames = new Set(orgRepos.map((r) => r.fullName));
+
+      // Fetch local status for all local repos in parallel
+      const allRepoNames = new Set<string>();
+      for (const r of [...myRepos, ...orgRepos, ...allRepos]) {
+        allRepoNames.add(r.name);
+      }
+
+      const localStatusMap = new Map<string, LocalRepoStatus | null>();
+      await Promise.all(
+        [...allRepoNames].map(async (name) => {
+          if (isClonedLocally(name)) {
+            try {
+              await fetchRemote(name);
+            } catch {
+              // fetch may fail if offline
             }
-        });
+            localStatusMap.set(name, await getLocalStatus(name));
+          } else {
+            localStatusMap.set(name, null);
+          }
+        }),
+      );
+
+      const toState = (repo: CourseRepo): CourseState => {
+        const local = localStatusMap.get(repo.name) ?? null;
+        return { repo, local, status: computeStatus(repo, local) };
+      };
+
+      this.myStates = myRepos.map(toState);
+      this.officialStates = orgRepos
+        .filter((r) => !myNames.has(r.fullName))
+        .map(toState);
+      this.communityStates = allRepos
+        .filter(
+          (r) =>
+            !myNames.has(r.fullName) &&
+            !orgNames.has(r.fullName) &&
+            r.owner !== this.creds!.giteaUsername,
+        )
+        .map(toState);
+    } catch (e: any) {
+      this.myStates = [];
+      this.officialStates = [];
+      this.communityStates = [];
+      vscode.window.showErrorMessage(`Failed to load courses: ${e.message}`);
     }
 
-    private _getHtml(webview: vscode.Webview): string {
-        return /* html */ `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: var(--vscode-font-family);
-            font-size: var(--vscode-font-size);
-            color: var(--vscode-foreground);
-            padding: 0;
-        }
+    this._onDidChange.fire(undefined);
+  }
 
-        .section {
-            margin-bottom: 4px;
-        }
-        .section-header {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            padding: 8px 12px;
-            font-size: 11px;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            color: var(--vscode-sideBarSectionHeader-foreground);
-            background: var(--vscode-sideBarSectionHeader-background);
-            cursor: pointer;
-            user-select: none;
-        }
-        .section-header:hover {
-            background: var(--vscode-list-hoverBackground);
-        }
-        .section-header .chevron {
-            font-size: 10px;
-            transition: transform 0.15s;
-        }
-        .section-header .chevron.collapsed {
-            transform: rotate(-90deg);
-        }
-        .section-header .count {
-            margin-left: auto;
-            opacity: 0.6;
-            font-weight: 400;
-        }
-        .section-body {
-            overflow: hidden;
-        }
-        .section-body.collapsed {
-            display: none;
-        }
+  getTreeItem(element: vscode.TreeItem): vscode.TreeItem {
+    return element;
+  }
 
-        .course-item {
-            padding: 6px 12px 6px 20px;
-            cursor: pointer;
-            display: flex;
-            flex-direction: column;
-            gap: 2px;
-        }
-        .course-item:hover {
-            background: var(--vscode-list-hoverBackground);
-        }
-        .course-name {
-            font-size: 13px;
-            font-weight: 500;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-        .course-meta {
-            font-size: 11px;
-            opacity: 0.7;
-            display: flex;
-            gap: 8px;
-        }
-        .course-desc {
-            font-size: 11px;
-            opacity: 0.6;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-        .course-actions {
-            display: none;
-            gap: 4px;
-            margin-top: 4px;
-        }
-        .course-item:hover .course-actions {
-            display: flex;
-        }
-        .action-btn {
-            font-size: 11px;
-            padding: 2px 8px;
-            border: 1px solid var(--vscode-button-secondaryBackground, #444);
-            background: var(--vscode-button-secondaryBackground);
-            color: var(--vscode-button-secondaryForeground);
-            border-radius: 3px;
-            cursor: pointer;
-        }
-        .action-btn:hover {
-            background: var(--vscode-button-secondaryHoverBackground);
-        }
-        .action-btn.primary {
-            background: var(--vscode-button-background);
-            color: var(--vscode-button-foreground);
-            border-color: var(--vscode-button-background);
-        }
-        .action-btn.primary:hover {
-            background: var(--vscode-button-hoverBackground);
-        }
+  async getChildren(element?: vscode.TreeItem): Promise<vscode.TreeItem[]> {
+    if (!this.creds) return [new SignInItem()];
 
-        .auth-section {
-            padding: 12px;
-            border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border, var(--vscode-panel-border));
-            margin-bottom: 4px;
-        }
-        .auth-status {
-            font-size: 11px;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        .auth-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: var(--vscode-testing-iconPassed, #4caf50);
-        }
-        .auth-dot.disconnected {
-            background: var(--vscode-testing-iconFailed, #f44336);
-        }
-
-        .empty-state {
-            padding: 16px 20px;
-            font-size: 12px;
-            opacity: 0.6;
-            text-align: center;
-        }
-        .create-btn {
-            display: block;
-            width: calc(100% - 40px);
-            margin: 8px 20px;
-            padding: 6px;
-            font-size: 12px;
-            text-align: center;
-            background: var(--vscode-button-background);
-            color: var(--vscode-button-foreground);
-            border: none;
-            border-radius: 3px;
-            cursor: pointer;
-        }
-        .create-btn:hover {
-            background: var(--vscode-button-hoverBackground);
-        }
-    </style>
-</head>
-<body>
-    <div class="auth-section">
-        <div class="auth-status">
-            <span class="auth-dot disconnected"></span>
-            <span>Not connected</span>
-            <span style="margin-left: auto; opacity: 0.6; font-size: 10px;">Setup in settings</span>
-        </div>
-    </div>
-
-    ${this._renderSection('Official Courses', 'official', MOCK_COURSES.official)}
-    ${this._renderSection('My Courses', 'user', MOCK_COURSES.user, true)}
-    ${this._renderSection('Community Courses', 'community', MOCK_COURSES.community)}
-
-    <script>
-        const vscode = acquireVsCodeApi();
-
-        document.querySelectorAll('.section-header').forEach(header => {
-            header.addEventListener('click', () => {
-                const body = header.nextElementSibling;
-                const chevron = header.querySelector('.chevron');
-                body.classList.toggle('collapsed');
-                chevron.classList.toggle('collapsed');
-            });
-        });
-
-        document.querySelectorAll('.action-btn').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                vscode.postMessage({
-                    command: btn.dataset.action,
-                    courseId: btn.dataset.courseId
-                });
-            });
-        });
-    </script>
-</body>
-</html>`;
+    if (!element) {
+      const sections: vscode.TreeItem[] = [];
+      sections.push(new SectionItem("My Courses", "my", this.myStates.length));
+      if (this.officialStates.length > 0) {
+        sections.push(
+          new SectionItem(
+            "LanguageReactor",
+            "official",
+            this.officialStates.length,
+          ),
+        );
+      }
+      if (this.communityStates.length > 0) {
+        sections.push(
+          new SectionItem(
+            "Community",
+            "community",
+            this.communityStates.length,
+          ),
+        );
+      }
+      return sections;
     }
 
-    private _renderSection(title: string, type: string, courses: CourseListItem[], showCreate = false): string {
-        const items = courses.map(c => this._renderCourseItem(c, type)).join('');
-        const empty = courses.length === 0 ? '<div class="empty-state">No courses yet</div>' : '';
-        const create = showCreate ? `<button class="create-btn" onclick="vscode.postMessage({command:'createNew'})">+ Create New Course</button>` : '';
-
-        return /* html */ `
-        <div class="section">
-            <div class="section-header">
-                <span class="chevron">▼</span>
-                ${title}
-                <span class="count">${courses.length}</span>
-            </div>
-            <div class="section-body">
-                ${items}${empty}${create}
-            </div>
-        </div>`;
+    if (element instanceof SectionItem) {
+      const statesMap = {
+        my: this.myStates,
+        official: this.officialStates,
+        community: this.communityStates,
+      };
+      const states = statesMap[element.section];
+      if (states.length === 0) {
+        if (element.section === "my")
+          return [new EmptyItem('No courses yet. Use "+" to create one.')];
+        return [new EmptyItem("No courses found.")];
+      }
+      return states.map((s) => new CourseItem(s));
     }
 
-    private _renderCourseItem(course: CourseListItem, type: string): string {
-        let actions = '';
-        if (type === 'official') {
-            actions = `
-                <button class="action-btn primary" data-action="downloadAndEdit" data-course-id="${course.id}">Download & Edit</button>
-                <button class="action-btn" data-action="suggestEdit" data-course-id="${course.id}">Suggest Edit</button>`;
-        } else if (type === 'user') {
-            actions = `
-                <button class="action-btn primary" data-action="openCourse" data-course-id="${course.id}">Open</button>
-                <button class="action-btn" data-action="uploadChanges" data-course-id="${course.id}">Upload</button>`;
-        } else if (type === 'community') {
-            actions = `
-                <button class="action-btn primary" data-action="forkCourse" data-course-id="${course.id}">Fork</button>
-                <button class="action-btn" data-action="previewCourse" data-course-id="${course.id}">Preview</button>`;
-        }
-
-        const author = course.author ? `<span>by ${course.author}</span>` : '';
-
-        return /* html */ `
-        <div class="course-item">
-            <div class="course-name">${course.title}</div>
-            <div class="course-meta">
-                <span>${course.language}</span>
-                <span>${course.moduleCount} modules</span>
-                ${author}
-            </div>
-            ${course.description ? `<div class="course-desc">${course.description}</div>` : ''}
-            <div class="course-actions">${actions}</div>
-        </div>`;
-    }
+    return [];
+  }
 }

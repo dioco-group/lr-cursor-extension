@@ -1,0 +1,52 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "LR Module",
+  "scopeName": "source.module",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#section-marker" },
+    { "include": "#example-marker" },
+    { "include": "#field" },
+    { "include": "#grammar-content" }
+  ],
+  "repository": {
+    "comment": {
+      "match": "^\\s*#.*$",
+      "name": "comment.line.number-sign.module"
+    },
+    "section-marker": {
+      "match": "^(\\$(?:MODULE|LESSON|DIALOGUE|EXERCISE|GRAMMAR|CHAT))(.*)$",
+      "captures": {
+        "1": { "name": "keyword.control.section.module" },
+        "2": { "name": "entity.name.section.module" }
+      }
+    },
+    "example-marker": {
+      "match": "^EXAMPLE$",
+      "name": "keyword.other.example.module"
+    },
+    "field": {
+      "match": "^([A-Z_]+):(\\s*)(.*)?$",
+      "captures": {
+        "1": { "name": "support.type.field.module" },
+        "3": { "name": "string.unquoted.value.module" }
+      }
+    },
+    "grammar-content": {
+      "patterns": [
+        {
+          "match": "\\{([^}]+)\\}",
+          "name": "markup.italic.audio-phrase.module"
+        },
+        {
+          "match": "\\*\\*(.+?)\\*\\*",
+          "name": "markup.bold.module"
+        },
+        {
+          "match": "\\*(.+?)\\*",
+          "name": "markup.italic.module"
+        }
+      ]
+    }
+  }
+}
