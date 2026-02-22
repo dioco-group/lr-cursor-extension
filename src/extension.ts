@@ -12,6 +12,7 @@ import {
 } from "./gitOps";
 import { forkRepo, createRepo } from "./giteaClient";
 import { ModuleDocumentSymbolProvider } from "./outlineProvider";
+import { checkForUpdates } from "./updater";
 
 const diagnosticCollection =
   vscode.languages.createDiagnosticCollection("lr-module");
@@ -19,6 +20,8 @@ let statusBarItem: vscode.StatusBarItem;
 
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(diagnosticCollection);
+
+  checkForUpdates();
 
   // --- Status bar ---
   statusBarItem = vscode.window.createStatusBarItem(
