@@ -13,7 +13,7 @@
 - Each lesson contains activities: $DIALOGUE, $EXERCISE, $GRAMMAR, or $CHAT
 
 ## Required header fields
-- DIOCO_DOC_ID: unique identifier (will be derived from repo path)
+- DIOCO_DOC_ID: optional identifier (moduleKey is derived from filename at runtime)
 - TITLE: human-readable module title
 - TARGET_LANG_G: target language code (e.g. fr, es, de, ja)
 - HOME_LANG_G: home/user language code (e.g. en)
