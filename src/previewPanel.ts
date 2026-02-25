@@ -93,7 +93,7 @@ export class ModulePreviewPanel {
     if (mod.description)
       html += `<p class="description">${esc(mod.description)}</p>`;
     html += `<div class="meta"><span class="badge target">${esc(mod.targetLang_G)}</span> <span class="badge home">${esc(mod.homeLang_G)}</span>`;
-    html += ` <span class="doc-id">${esc(mod.diocoDocId)}</span></div>`;
+    html += ` <span class="doc-id">${esc(mod.moduleKey)}</span></div>`;
     html += this.renderVoiceConfig(mod);
     html += `</header>`;
     for (const lesson of mod.lessons) {

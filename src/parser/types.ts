@@ -1,6 +1,7 @@
 import { langCode_G_t } from "./lang";
 
 export interface Course {
+  diocoDocId: string;
   diocoPlaylistId: string;
   title: string;
   description: string;
@@ -24,7 +25,7 @@ export interface ModuleVoiceConfig {
 }
 
 export interface Module {
-  diocoDocId: string;
+  moduleKey: string;
   title: string;
   description: string | null;
   image: string | null;

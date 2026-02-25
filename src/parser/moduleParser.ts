@@ -154,14 +154,13 @@ export function parseModuleFile(content: string): Module {
 
   // Validate module
   const mod = state.module;
-  if (!mod.diocoDocId) throw new Error("Missing DIOCO_DOC_ID in .module file");
   if (!mod.title) throw new Error("Missing TITLE in .module file");
   if (!mod.targetLang_G)
     throw new Error("Missing TARGET_LANG_G in .module file");
   if (!mod.homeLang_G) throw new Error("Missing HOME_LANG_G in .module file");
 
   return {
-    diocoDocId: mod.diocoDocId,
+    moduleKey: (mod as any).diocoDocId || (mod as any).moduleKey || '',
     title: mod.title,
     description: mod.description || null,
     image: mod.image || null,
@@ -253,7 +252,7 @@ function handleField(field: string, value: string, state: ParserState): void {
   if (!state.currentActivity && !state.currentLesson) {
     switch (field) {
       case "DIOCO_DOC_ID":
-        state.module.diocoDocId = value;
+        (state.module as any).diocoDocId = value;
         return;
       case "TITLE":
         state.module.title = value;
